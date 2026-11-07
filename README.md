@@ -30,7 +30,7 @@ uv run ruff check .
 ```
 src/findex/
   corpus.py     # iter_documents(root) -> Iterator[Document]   (.txt/.rst/.md і .jsonl)
-  tokenize.py   # tokenize(text) -> Iterator[str], tokenize_with_offsets(...)
+  tokenize.py   # tokenize(text) -> Iterator[str], iter_spans(text) -> (token, start, end)
   stats.py      # один прохід: документи, токени, словник, топ-N; час і пік пам'яті
 tests/test_tokenize.py
 scripts/get_corpus.sh
@@ -73,8 +73,8 @@ scripts/get_corpus.sh
 
 ```
 src/findex/
-  index.py    # Posting, DocMeta, InvertedIndex, build_index(); CLI python -m findex.index
-  search.py   # двовказівникові merge_and/or/not, set-альтернатива, search(); CLI python -m findex.search
+  index.py    # Posting, DocMeta, індекс, build_index(); CLI python -m findex.index
+  boolean.py  # двовказівникові merge_and/or/not, set-альтернатива (у Лабі 3 винесено з search.py)
   store.py    # save/load: pickle (index.bin) або JSON (index.json) — за розширенням файлу
 scripts/lab02_measure.py   # усі таблиці нижче
 tests/test_index.py        # побудова, hashable-записи, запити (обидва движки), merge == set, round-trip
@@ -86,11 +86,11 @@ tests/test_index.py        # побудова, hashable-записи, запит
 
 ```bash
 uv run python -m findex.index data/ --out index.bin [--positions] [--limit N]   # або --out index.json
-uv run python -m findex.search index.bin "async OR await NOT thread" [--engine merge|set]
+uv run python -m findex.search index.bin "async OR await NOT thread"   # з Лаби 3 — ранжований пошук
 uv run python scripts/lab02_measure.py data/
 ```
 
-Синтаксис запиту: `a b` = AND, `a OR b`, `a NOT b`, `NOT b`. Обчислюється зліва направо; повноцінний парсер з'явиться в Лабі 3.
+Синтаксис запиту: `a b` = AND, `a OR b`, `a NOT b`, `NOT b` (з Лаби 3 — повноцінний парсер, див. нижче).
 Обидві команди друкують час і пік пам'яті (`tracemalloc`). Під `tracemalloc` усе виконується в 2–3 рази повільніше, тому в таблицях нижче час заміряно без нього.
 
 Корпус: 560 документів, 42 603 терміни, 331 826 постінгів. Машина та сама, що в Лабі 1.
@@ -142,3 +142,111 @@ uv run python scripts/lab02_measure.py data/
 - **`array('I')`**: об'єктів немає зовсім, лише сирі 4-байтові числа: 8 байтів на постінг (doc_id + tf) плюс невеликий заголовок масиву на кожен термін. Ось чому це найменший і найшвидший для завантаження варіант (pickle просто копіює буфер). У Лабі 8 ці масиви без копіювання стануть NumPy-масивами (`np.frombuffer`).
 
 У поточному індексі використано `slots=True`, як вимагає лаба. `array` залишено для Лаби 8.
+
+---
+
+# Лабораторна 3 — рейтинг і модель об'єктів
+
+## Що зроблено
+
+```
+src/findex/
+  index.py    # class Index(Mapping[str, list[Posting]]); build_index() @timed
+  query.py    # рекурсивний спуск -> дерево Term / Phrase / And / Or / Not (&, |, ~, evaluate)
+  scoring.py  # протокол Scorer; TfIdf, BM25(k1=1.5, b=0.75)
+  search.py   # search(): match (lru_cache) -> бали -> heapq.nlargest -> SearchResult + сніпет
+  store.py    # load() @timed, open_index() — context manager
+  timing.py   # @timed з functools.wraps (лог DEBUG)
+scripts/lab03_eval.py      # sanity-check і precision@5 (таблиці нижче)
+tests/test_lab03.py        # дерева парсера, dunder-и, скорери, кеш, сніпети, open_index при винятку
+```
+
+- **`Index`** наслідує `collections.abc.Mapping`: працюють `len(ix)` (кількість термінів), `"python" in ix`, `ix["python"]` (`KeyError`, якщо терміна немає), `for t in ix`, `repr(ix)` → `Index(terms=42_604, docs=560, positions=True)`, а також `keys()/items()/get()` безкоштовно. Крім того є `num_docs`, `avg_doc_length` і `all_doc_ids` (`cached_property`: рахуються один раз, а не для кожного документа), `doc_length()`, `df()`. Для pickle `__getstate__` зберігає лише дані, без кешів.
+- **`open_index(path)`** — це `@contextmanager` з `try/finally`, тому `close()` (очищення кешу) виконується навіть при винятку; це перевіряє окремий тест.
+- **`Scorer`** — `typing.Protocol` з `__call__(term, posting, index) -> float`. `TfIdf` і `BM25` не мають спільного предка, і `search(..., scorer=...)` приймає будь-який із них.
+- **`SearchResult`** — `@dataclass(frozen=True, slots=True, order=True)` з першим полем `score`, тож `sorted(results)` сортує за балом.
+- **Парсер**: `python AND (async OR await) NOT java "event loop"` → `And(And(And(Term('python'), Or(Term('async'), Term('await'))), Not(Term('java'))), Phrase(('event', 'loop')))`. Тести порівнюють дерева, наприклад `parse("a OR b c") == Or(Term("a"), And(Term("b"), Term("c")))`. `Phrase` використовує позиції (індекс треба будувати з `--positions`): позиція `p` першого слова плюс `p+1`, `p+2`, … наступних.
+- **Сніпети**: вікно ±80 символів навколо місця, де поруч найбільше різних термінів запиту; терміни виділяються як `**term**`. Зсуви беруться з `iter_spans` (regex на NFC-тексті до `casefold`, бо `casefold` може змінити довжину рядка).
+
+```bash
+uv run python -m findex.index data/ --out index.bin --positions
+uv run python -m findex.search index.bin 'python AND (async OR await) NOT java "event loop"' -k 3 --repeat 2 -v
+uv run python scripts/lab03_eval.py index.bin
+```
+
+## Сліди @timed і кешу
+
+Той самий запит двічі в одному процесі (`--repeat 2 -v`):
+
+```
+DEBUG findex.timing: load took 822.8 ms
+DEBUG findex.timing: match took 2.1 ms          <- 1-й раз: розбір і обчислення дерева
+DEBUG findex.timing: search took 45.6 ms
+DEBUG findex.search: cache hit for 'python AND (async OR await) NOT java "event loop"'
+DEBUG findex.timing: search took 43.6 ms        <- 2-й раз: match не виконувався (немає рядка "match took")
+
+ 1.  18.53  A conceptual overview of :mod:`!asyncio`  (data/python-docs/howto/a-conceptual-overview-of-asyncio.rst)
+    …he **event** **loop**...") **async** def main(): task_b = asyncio.create_task(coro_b()) …
+ 2.  18.36  Developing with asyncio  (data/python-docs/library/asyncio-dev.rst)
+    …the **event** **loop**, no other Tasks can run in the same thread. When a Task executes an ``**await**`` …
+```
+
+`@timed` стоїть *під* `@lru_cache` на `match`, тому рядок `match took` з'являється лише при промаху кешу. Основний час пошуку (~43 мс) іде на сніпети: для топ-k документів файл читається з диска і токенізується заново. Перший варіант вибору вікна був квадратичним (79 мс); після переходу на ковзне вікно O(кількість входжень) — 45 мс.
+
+## Три перевірки рейтингу (на корпусі)
+
+**1. Рідкий термін вище частого.** Запит `class OR winsound` (df 380 проти 5): документи, де є лише рідкий `winsound`, стоять вище за всі документи, де є лише частий `class` (BM25 idf: 4,6 проти 0,4).
+
+| rank | BM25 | document | містить |
+|---|---|---|---|
+| 1 | 10.83 | `library/winsound.rst` | winsound |
+| 2 | 8.35 | `library/windows.rst` | winsound |
+| 3 | 8.22 | `extending/windows.rst` | winsound |
+| 4 | 6.13 | `whatsnew/3.6.rst` | class, winsound |
+| 6 | 0.96 | `library/collections.abc.rst` | class (найкращий документ лише з `class`) |
+
+**2. 20-те повторення майже нічого не додає.** Термін `loop`, документ середньої довжини (3 231 токен):
+
+| tf | TF-IDF | BM25 |
+|---|---|---|
+| 1 | 1.58 | 1.581 |
+| 2 | 3.17 | 2.258 |
+| 5 | 7.92 | 3.039 |
+| 10 | 15.83 | 3.436 |
+| 19 | 30.08 | 3.662 |
+| 20 | 31.66 | 3.675 |
+
+20-те входження додає до TF-IDF +1,58 (стільки ж, скільки перше), а до BM25 лише +0,013 (0,9 % від першого): це насичення через `k1`.
+
+**3. Короткий документ з одним входженням вище довгого.** Термін `winsound`, в обох документах tf = 1:
+
+| document | довжина | TF-IDF | BM25 |
+|---|---|---|---|
+| `library/windows.rst` | 26 | 4.72 | 8.35 |
+| `whatsnew/3.13.rst` | 15,052 | 4.72 | 1.75 |
+
+TF-IDF не розрізняє ці документи, а BM25 через нормалізацію довжини (`b = 0.75`) дає короткому документу бал у 4,8 раза вищий. При `b = 0` бали були б рівні.
+
+## precision@5: TF-IDF vs BM25
+
+10 запитів, релевантні документи розмічені вручну **до** запуску пошуку (`QRELS` у `scripts/lab03_eval.py`). P@5 = (кількість релевантних у топ-5) / 5. Колонка «max» показує найкраще можливе значення, коли релевантних документів менше п'яти.
+
+| Запит | релевантних | max P@5 | TF-IDF | BM25 |
+|---|---|---|---|---|
+| `"event loop"` | 5 | 1.0 | 0.6 | 1.0 |
+| `"regular expression"` | 2 | 0.4 | 0.4 | 0.4 |
+| `unicode normalization` | 2 | 0.4 | 0.4 | 0.4 |
+| `"garbage collector"` | 4 | 0.8 | 0.6 | 0.6 |
+| `"context manager"` | 3 | 0.6 | 0.2 | 0.2 |
+| `thread lock` | 3 | 0.6 | 0.2 | 0.4 |
+| `json decode` | 1 | 0.2 | 0.2 | 0.2 |
+| `pickle unpickling security` | 4 | 0.8 | 0.2 | 0.2 |
+| `decorator wraps` | 1 | 0.2 | 0.2 | 0.2 |
+| `"virtual environment"` | 4 | 0.8 | 0.4 | 0.6 |
+| **середнє** | | **0.58** | **0.34** | **0.42** |
+
+BM25 виграє (0,42 проти 0,34; стеля 0,58). Різницю видно на `"event loop"` і `thread lock`. TF-IDF лінійний за tf і не штрафує довжину, тому підіймає довгі документи з багатьма згадками: `asyncio-task.rst` і `asyncio-protocol.rst` в одному випадку, `multiprocessing.rst` і `glossary.rst` в іншому. BM25 ставить на їхнє місце короткі профільні сторінки (`asyncio-runner.rst`, `asyncio-dev.rst`, `_thread.rst`). Де обидва програли, це через мене і через AND, а не через формулу:
+- `"context manager"`: обидва ставлять першим `contextlib.rst`, далі йдуть модулі, які справді надають context managers (`tempfile`, `multiprocessing`, `decimal`). Моя розмітка (`datamodel`, `compound_stmts`) виявилася занадто вузькою.
+- `pickle unpickling security`: неявний AND пропускає лише 4 документи, що містять усі три слова; у `pickletools`, `copyreg`, `shelve` їх немає. Для таких запитів краще підійшов би OR з рейтингом.
+
+Вибірка мала й шумна, але звичка міряти рейтинг закладена; у Лабі 8 ці 10 запитів стануть основою оцінки гібридного пошуку.

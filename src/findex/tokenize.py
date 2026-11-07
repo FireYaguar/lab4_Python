@@ -25,14 +25,19 @@ def normalize(text: str) -> str:
     return unicodedata.normalize("NFC", text).translate(_APOSTROPHES).casefold()
 
 
-def tokenize_with_offsets(text: str) -> Iterator[tuple[str, int]]:
-    """Yield (token, start offset in the normalized text). Positions are for Lab 3."""
-    for m in TOKEN_RE.finditer(normalize(text)):  # finditer: lazy, no list of matches
-        tok = m.group()
+def iter_spans(text: str) -> Iterator[tuple[str, int, int]]:
+    """Yield (token, start, end); offsets point into unicodedata.normalize("NFC", text).
+
+    The regex runs on the NFC text *before* casefold (casefold can change string length,
+    e.g. "ß" -> "ss"), so the offsets are usable for snippets in Lab 3.
+    """
+    nfc = unicodedata.normalize("NFC", text).translate(_APOSTROPHES)  # 1:1 char mapping
+    for m in TOKEN_RE.finditer(nfc):  # finditer: lazy, no list of matches
+        tok = m.group().casefold()
         if tok.strip("_"):
-            yield tok, m.start()
+            yield tok, m.start(), m.end()
 
 
 def tokenize(text: str) -> Iterator[str]:
-    for tok, _ in tokenize_with_offsets(text):
+    for tok, _, _ in iter_spans(text):
         yield tok

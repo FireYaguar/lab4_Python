@@ -3,9 +3,10 @@ from pathlib import Path
 
 import pytest
 
+from findex.boolean import ENGINES
 from findex.corpus import Document
 from findex.index import DocMeta, Posting, build_index
-from findex.search import ENGINES, search
+from findex.query import parse
 from findex.store import load, save
 
 DOCS = [
@@ -36,7 +37,6 @@ def test_records_are_hashable_and_frozen() -> None:
         Posting(1, 2).tf = 5  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("engine", ["merge", "set"])
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
@@ -49,8 +49,8 @@ def test_records_are_hashable_and_frozen() -> None:
         ("missing", []),
     ],
 )
-def test_search(index, engine, query, expected) -> None:
-    assert search(index, query, engine) == expected
+def test_boolean_queries(index, query, expected) -> None:
+    assert parse(query).evaluate(index) == expected
 
 
 def test_merge_matches_set_on_random_lists() -> None:

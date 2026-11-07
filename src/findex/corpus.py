@@ -22,9 +22,11 @@ class Document:
 
 
 def _title_from(text: str, fallback: str) -> str:
-    """First non-empty line that is not an rst/markdown decoration."""
+    """First non-empty line that is not an rst directive/field or a decoration line."""
     for line in text.splitlines():
         line = line.strip().lstrip("#").strip()
+        if line.startswith(("..", ":")):
+            continue
         if line and not set(line) <= set("=-~*^#.:`'\"+_ "):
             return line[:120]
     return fallback

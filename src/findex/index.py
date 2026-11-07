@@ -1,6 +1,6 @@
 """Inverted index: term -> postings sorted by doc_id. Built in ONE pass over the lazy corpus.
 
-    python -m findex.index data/ --out index.bin [--positions] [--limit N]
+    python -m findex.index data/ --out index.bin [--positions] [--limit N] [-v]
 
 The output format is chosen by suffix: *.json -> JSON, anything else -> pickle (see store.py).
 """
@@ -8,15 +8,20 @@ The output format is chosen by suffix: *.json -> JSON, anything else -> pickle (
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
+from typing import Any
 
 from findex.corpus import Document, iter_documents
+from findex.timing import timed
 from findex.tokenize import tokenize
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,24 +38,112 @@ class DocMeta:
     title: str
 
 
-@dataclass(slots=True)
-class InvertedIndex:
-    postings: dict[str, list[Posting]] = field(default_factory=dict[str, list[Posting]])
-    doc_lengths: dict[int, int] = field(default_factory=dict[int, int])  # tokens per doc (BM25)
-    doc_meta: dict[int, DocMeta] = field(default_factory=dict[int, DocMeta])
-    has_positions: bool = False
+class Index(Mapping[str, list[Posting]]):
+    """The index behaves like a read-only dict: len(ix), "term" in ix, ix[term], for t in ix.
 
+    Inheriting collections.abc.Mapping gives keys()/items()/get()/== for free from
+    __getitem__, __len__ and __iter__.
+    """
+
+    def __init__(
+        self,
+        postings: dict[str, list[Posting]] | None = None,
+        doc_lengths: dict[int, int] | None = None,
+        doc_meta: dict[int, DocMeta] | None = None,
+        has_positions: bool = False,
+    ) -> None:
+        self.postings: dict[str, list[Posting]] = postings if postings is not None else {}
+        self.doc_lengths: dict[int, int] = doc_lengths if doc_lengths is not None else {}
+        self.doc_meta: dict[int, DocMeta] = doc_meta if doc_meta is not None else {}
+        self.has_positions = has_positions
+        self._init_cache()
+
+    # --- the data model: built-ins dispatch here ---
+    def __getitem__(self, term: str) -> list[Posting]:
+        return self.postings[term]  # KeyError if the term is absent
+
+    def __contains__(self, term: object) -> bool:
+        return term in self.postings  # faster than Mapping's default (try/except __getitem__)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.postings)
+
+    def __len__(self) -> int:
+        return len(self.postings)  # number of terms
+
+    def __repr__(self) -> str:
+        return f"Index(terms={len(self):_}, docs={self.num_docs:_}, positions={self.has_positions})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Index):
+            return NotImplemented
+        return (
+            self.postings == other.postings
+            and self.doc_lengths == other.doc_lengths
+            and self.doc_meta == other.doc_meta
+            and self.has_positions == other.has_positions
+        )
+
+    __hash__ = None  # type: ignore[assignment]  # mutable container with value equality
+
+    # --- computed attributes ---
     @property
     def num_docs(self) -> int:
         return len(self.doc_lengths)
 
+    @functools.cached_property
+    def avg_doc_length(self) -> float:  # needed for every BM25 score: compute once
+        return sum(self.doc_lengths.values()) / self.num_docs if self.num_docs else 0.0
 
-def build_index(docs: Iterable[Document], *, positions: bool = False) -> InvertedIndex:
+    @functools.cached_property
+    def all_doc_ids(self) -> list[int]:
+        return sorted(self.doc_lengths)
+
+    def doc_length(self, doc_id: int) -> int:
+        return self.doc_lengths[doc_id]
+
+    def df(self, term: str) -> int:
+        return len(self.postings.get(term, ()))
+
+    def doc_ids(self, term: str) -> list[int]:
+        return [p.doc_id for p in self.postings.get(term, ())]
+
+    # --- query cache: query string -> matching doc ids (see search.match) ---
+    def _init_cache(self) -> None:
+        from findex.query import parse  # local import: query.py imports Index
+
+        @functools.lru_cache(maxsize=256)
+        @timed  # inside the cache: logged only on a miss
+        def match(query: str) -> tuple[int, ...]:
+            return tuple(parse(query).evaluate(self))
+
+        self.match = match  # per-instance lru_cache, freed together with the index
+
+    def close(self) -> None:
+        """Release what the index holds (caches now; an mmap later)."""
+        self.match.cache_clear()
+
+    # pickle: store only the data, not the cache closure or cached properties
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "postings": self.postings,
+            "doc_lengths": self.doc_lengths,
+            "doc_meta": self.doc_meta,
+            "has_positions": self.has_positions,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__init__(**state)
+
+
+@timed
+def build_index(docs: Iterable[Document], *, positions: bool = False) -> Index:
     """One streaming pass. Per document we keep a Counter (or term -> positions),
     flush it into the postings and drop it. doc_ids arrive increasing, so every
     postings list is sorted by doc_id without an explicit sort."""
     postings: defaultdict[str, list[Posting]] = defaultdict(list)
-    index = InvertedIndex(has_positions=positions)
+    doc_lengths: dict[int, int] = {}
+    doc_meta: dict[int, DocMeta] = {}
     for doc in docs:
         if positions:
             pos: defaultdict[str, list[int]] = defaultdict(list)
@@ -65,10 +158,9 @@ def build_index(docs: Iterable[Document], *, positions: bool = False) -> Inverte
             for term, tf in counts.items():
                 postings[term].append(Posting(doc.doc_id, tf))
             length = counts.total()
-        index.doc_lengths[doc.doc_id] = length
-        index.doc_meta[doc.doc_id] = DocMeta(doc.doc_id, doc.path, doc.title)
-    index.postings = dict(postings)  # plain dict: no accidental inserts on lookup of a missing term
-    return index
+        doc_lengths[doc.doc_id] = length
+        doc_meta[doc.doc_id] = DocMeta(doc.doc_id, doc.path, doc.title)
+    return Index(dict(postings), doc_lengths, doc_meta, positions)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -80,16 +172,19 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--positions", action="store_true", help="store token positions (phrases)")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("-v", "--verbose", action="store_true", help="debug log (@timed)")
     args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     index, t_build, peak = measure(
         lambda: build_index(islice(iter_documents(args.root), args.limit), positions=args.positions)
     )
     _, t_save, _ = measure(lambda: save(index, args.out))
     n_postings = sum(len(p) for p in index.postings.values())
-    print(f"documents:   {index.num_docs:,}")
-    print(f"terms:       {len(index.postings):,}")
+    print(repr(index))
     print(f"postings:    {n_postings:,}")
     print(f"build:       {t_build:.2f} s, peak memory {peak / 2**20:.1f} MiB (tracemalloc)")
     print(f"save:        {t_save:.2f} s -> {args.out} ({args.out.stat().st_size / 2**20:.1f} MiB)")

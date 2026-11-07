@@ -18,9 +18,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from findex.boolean import ENGINES
 from findex.corpus import iter_documents
-from findex.index import InvertedIndex, build_index
-from findex.search import ENGINES, doc_ids
+from findex.index import Index, build_index
 from findex.store import load, save
 from findex.tokenize import tokenize
 
@@ -37,7 +37,7 @@ def median_time(fn: Callable[[], object], runs: int = 3) -> float:
 
 
 # ---------- 1. merge vs set ----------
-def bench_engines(index: InvertedIndex) -> None:
+def bench_engines(index: Index) -> None:
     by_df = sorted(index.postings, key=lambda t: len(index.postings[t]))
     common, rare = by_df[-2:], by_df[:2]
     pairs = [
@@ -47,7 +47,7 @@ def bench_engines(index: InvertedIndex) -> None:
     ]
     print("| Terms | df | Op | merge (µs) | set (µs) |\n|---|---|---|---|---|")
     for label, (t1, t2) in pairs:
-        a, b = doc_ids(index, t1), doc_ids(index, t2)
+        a, b = index.doc_ids(t1), index.doc_ids(t2)
         for op_i, op in enumerate(["AND", "OR"]):
             res = []
             for eng in ("merge", "set"):

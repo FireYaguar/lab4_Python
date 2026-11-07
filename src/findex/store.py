@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import json
 import pickle
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from findex.index import DocMeta, InvertedIndex, Posting
+from findex.index import DocMeta, Index, Posting
+from findex.timing import timed
 
 
-def save(index: InvertedIndex, path: Path) -> None:
+def save(index: Index, path: Path) -> None:
     if path.suffix == ".json":
         _save_json(index, path)
     else:
@@ -31,17 +34,18 @@ def save(index: InvertedIndex, path: Path) -> None:
             pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def load(path: Path) -> InvertedIndex:
+@timed
+def load(path: Path) -> Index:
     if path.suffix == ".json":
         return _load_json(path)
     with path.open("rb") as f:
         obj = pickle.load(f)  # trusted, self-built file only — see module docstring
-    if not isinstance(obj, InvertedIndex):
-        raise TypeError(f"{path} does not contain an InvertedIndex")
+    if not isinstance(obj, Index):
+        raise TypeError(f"{path} does not contain an Index")
     return obj
 
 
-def _save_json(index: InvertedIndex, path: Path) -> None:
+def _save_json(index: Index, path: Path) -> None:
     postings: dict[str, dict[str, list[Any]]] = {}
     for term, plist in index.postings.items():
         col: dict[str, list[Any]] = {
@@ -61,15 +65,28 @@ def _save_json(index: InvertedIndex, path: Path) -> None:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def _load_json(path: Path) -> InvertedIndex:
+def _load_json(path: Path) -> Index:
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
-    index = InvertedIndex(has_positions=bool(data["has_positions"]))
-    index.doc_lengths = {int(k): v for k, v in data["doc_lengths"].items()}
-    index.doc_meta = {int(k): DocMeta(int(k), p, t) for k, (p, t) in data["doc_meta"].items()}
+    postings: dict[str, list[Posting]] = {}
     for term, col in data["postings"].items():
         pos = col.get("positions") or [()] * len(col["doc_ids"])
-        index.postings[term] = [
+        postings[term] = [
             Posting(d, tf, tuple(ps)) for d, tf, ps in zip(col["doc_ids"], col["tfs"], pos)
         ]
-    return index
+    return Index(
+        postings,
+        {int(k): v for k, v in data["doc_lengths"].items()},
+        {int(k): DocMeta(int(k), p, t) for k, (p, t) in data["doc_meta"].items()},
+        bool(data["has_positions"]),
+    )
+
+
+@contextmanager
+def open_index(path: Path) -> Iterator[Index]:
+    """with open_index(p) as ix: ...  — close() runs even if the body raises or returns."""
+    index = load(path)
+    try:
+        yield index
+    finally:
+        index.close()
