@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Literal
 
 
 def merge_and(a: Sequence[int], b: Sequence[int]) -> list[int]:
@@ -68,7 +69,8 @@ def set_not(a: Sequence[int], b: Sequence[int]) -> list[int]:
 
 
 type Op = Callable[[Sequence[int], Sequence[int]], list[int]]
-ENGINES: dict[str, tuple[Op, Op, Op]] = {
+type Engine = Literal["merge", "set"]
+ENGINES: dict[Engine, tuple[Op, Op, Op]] = {
     "merge": (merge_and, merge_or, merge_not),
     "set": (set_and, set_or, set_not),
 }

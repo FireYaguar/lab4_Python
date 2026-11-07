@@ -1,5 +1,7 @@
 # findex
 
+[![CI](https://github.com/OWNER/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/findex/actions/workflows/ci.yml)
+
 Повнотекстовий пошуковик, який будую протягом семестру (курс «Python — Build a Search Engine», 8 лабораторних).
 Кожна лабораторна — окремий git-тег (`lab-01`, `lab-02`, …).
 
@@ -17,10 +19,11 @@
 ## Встановлення і запуск
 
 ```bash
-uv sync
-uv run python -m findex.stats data/                 # лінива версія (за замовчуванням)
-uv run python -m findex.stats data/ --limit 100     # перші 100 документів (itertools.islice)
-uv run python -m findex.stats data/ --eager         # «жадібна» версія для порівняння
+uv tool install .                         # команда findex у PATH (або: uv tool install <wheel з релізу>)
+uv sync                                   # середовище розробки
+uv run findex stats data/                 # лінива версія (за замовчуванням)
+uv run findex stats data/ --limit 100     # перші 100 документів (itertools.islice)
+uv run findex stats data/ --eager         # «жадібна» версія для порівняння
 uv run pytest
 uv run ruff check .
 ```
@@ -73,7 +76,7 @@ scripts/get_corpus.sh
 
 ```
 src/findex/
-  index.py    # Posting, DocMeta, індекс, build_index(); CLI python -m findex.index
+  index.py    # Posting, DocMeta, індекс, build_index()
   boolean.py  # двовказівникові merge_and/or/not, set-альтернатива (у Лабі 3 винесено з search.py)
   store.py    # save/load: pickle (index.bin) або JSON (index.json) — за розширенням файлу
 scripts/lab02_measure.py   # усі таблиці нижче
@@ -85,8 +88,8 @@ tests/test_index.py        # побудова, hashable-записи, запит
 - `--positions` додає до постінгів порядкові номери токенів (знадобляться для фраз у Лабі 3).
 
 ```bash
-uv run python -m findex.index data/ --out index.bin [--positions] [--limit N]   # або --out index.json
-uv run python -m findex.search index.bin "async OR await NOT thread"   # з Лаби 3 — ранжований пошук
+uv run findex index data/ --out index.bin [--positions] [--limit N]   # або --out index.json
+uv run findex search index.bin "async OR await NOT thread"   # з Лаби 3 — ранжований пошук
 uv run python scripts/lab02_measure.py data/
 ```
 
@@ -169,14 +172,14 @@ tests/test_lab03.py        # дерева парсера, dunder-и, скоре�
 - **Сніпети**: вікно ±80 символів навколо місця, де поруч найбільше різних термінів запиту; терміни виділяються як `**term**`. Зсуви беруться з `iter_spans` (regex на NFC-тексті до `casefold`, бо `casefold` може змінити довжину рядка).
 
 ```bash
-uv run python -m findex.index data/ --out index.bin --positions
-uv run python -m findex.search index.bin 'python AND (async OR await) NOT java "event loop"' -k 3 --repeat 2 -v
+uv run findex index data/ --out index.bin --positions
+uv run findex -vv search index.bin 'python AND (async OR await) NOT java "event loop"' -k 3
 uv run python scripts/lab03_eval.py index.bin
 ```
 
 ## Сліди @timed і кешу
 
-Той самий запит двічі в одному процесі (`--repeat 2 -v`):
+Той самий запит двічі в одному процесі (лог з CLI Лаби 3; з Лаби 4 кеш перевіряє тест `test_search_results_sorted_and_cached`):
 
 ```
 DEBUG findex.timing: load took 822.8 ms
@@ -250,3 +253,73 @@ BM25 виграє (0,42 проти 0,34; стеля 0,58). Різницю вид
 - `pickle unpickling security`: неявний AND пропускає лише 4 документи, що містять усі три слова; у `pickletools`, `copyreg`, `shelve` їх немає. Для таких запитів краще підійшов би OR з рейтингом.
 
 Вибірка мала й шумна, але звичка міряти рейтинг закладена; у Лабі 8 ці 10 запитів стануть основою оцінки гібридного пошуку.
+
+---
+
+# Лабораторна 4 — типи, тести, пакування, CLI
+
+## Встановлення і команди
+
+```bash
+uv tool install .                                   # з репозиторію
+uv tool install findex-0.4.0-py3-none-any.whl       # або з wheel релізу v0.4.0
+findex --help
+findex index data/ --out index.bin --positions      # смуга прогресу rich (stderr)
+findex search index.bin '"event loop" NOT thread' -k 5 [--scorer bm25|tfidf]
+findex search index.bin python --json | jq .title   # JSON lines у stdout
+findex stats data/ --top 20 [--eager]
+findex -v ...  / findex -vv ...                     # INFO / DEBUG логи (до підкоманди)
+python -m findex ...                                # те саме без встановлення
+```
+
+- **Точка входу**: `[project.scripts] findex = "findex.cli:app"`. Після встановлення wheel у `bin/` з'являється скрипт `findex`, який імпортує `findex.cli` і викликає `app()`.
+- **stdout/stderr**: таблиці й `--json` йдуть у stdout; логи (`RichHandler`), смуга прогресу й помилки — у stderr. Логер налаштовується **один раз** у `cli.root` (`-v` → INFO, `-vv` → DEBUG); у бібліотеці лише `logging.getLogger(__name__)`. Діагностичних `print` у бібліотеці не лишилося; `measure`, `@timed` і кеш пишуть у лог.
+- **Очікувані помилки** дають один рядок без traceback і ненульовий код виходу:
+  ```
+  $ findex search nope.bin x          ->  error: index file not found: nope.bin (build it with `findex index`)   exit 1
+  $ findex search index.bin '(python' ->  error: bad query: missing ')'                                         exit 2
+  ```
+- Старі `python -m findex.index/search/stats` (argparse) замінені на підкоманди typer.
+
+## Типи (pyright strict)
+
+`[tool.pyright] typeCheckingMode = "strict"`, перевіряються `src/` і `tests/`: **0 errors**. `scripts/` (разові скрипти вимірювань) у перевірку не входять.
+- `Scorer` — `typing.Protocol` (`__call__(term, posting, index) -> float`); `TfIdf` і `BM25` йому відповідають структурно, без наслідування.
+- Генератори повертають `Iterator[...]`, функції приймають `Iterable[...]` (`build_index(docs: Iterable[Document])`).
+- `Literal`: `type ScorerName = Literal["bm25", "tfidf"]`, `type Engine = Literal["merge", "set"]`. У CLI це `StrEnum`, бо typer будує варіанти вибору з Enum.
+- PEP 695: `def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]`, `def measure[T](...)`.
+- `# type: ignore` два, і кожен з поясненням: `__hash__ = None` в `Index` (змінний контейнер з рівністю за значенням) і присвоєння полю frozen-датакласу в тесті (саме його падіння й перевіряється).
+
+## Тести
+
+**63 тести** (pytest), з них 4 властивості Hypothesis; спільні фікстури (крихітний корпус, індекс, файл індексу) лежать у `tests/conftest.py`.
+
+| Файл | Що перевіряє |
+|---|---|
+| `test_tokenize.py` | parametrize-таблиця: регістр, `ß`, кирилиця, NFC, дефіси, апострофи, цифри, `_`, порожній рядок; зсуви `iter_spans` |
+| `test_corpus.py` | лінивість, JSON-lines, зламаний UTF-8, `count_documents` |
+| `test_index.py` | постінги й позиції, hashable/frozen, dunder-и `Index`, Boolean-запити, save/load (pickle і JSON), `open_index` при винятку |
+| `test_search.py` | дерева парсера, помилки парсера, фрази, обидва скорери, **три sanity-check BM25 з Лаби 3**, кеш, `@timed` + `wraps`, сніпети |
+| `test_properties.py` | Hypothesis: токени непорожні й токенізація ідемпотентна; постінги завжди відсортовані; merge == set для AND/OR/NOT; `load(save(ix)) == ix` |
+| `test_cli.py` | `CliRunner`: `--help/--version`, index→search, `--json`, stats, помилки з кодами 1/2 без traceback, логи лише в stderr; `slow`: повний корпус |
+
+```bash
+uv run pytest                      # швидкі (< 1 с); маркер slow пропущено через addopts
+uv run pytest -m slow              # лише повільні (індекс на всьому корпусі, ~25 с)
+uv run pytest -m "" --cov          # усе + покриття
+```
+
+**Покриття: 97 %** (692 інструкції, 24 не покриті; `pytest -m "" --cov`). Навмисно не покрито:
+- `__main__.py` і гілка `PackageNotFoundError` в `__init__.py`: запуск без встановленого пакета, перевіряється вручну;
+- `compute_stats_eager` і `measure`-шлях `findex stats --eager`: це навмисно погана версія з Лаби 1, потрібна лише для таблиці;
+- гілки помилок, які важко відтворити в тесті: зламаний (не наш) файл індексу, некоректний вузол парсера, порожній корпус (`avg_doc_length` = 0).
+
+## CI і реліз
+
+`.github/workflows/ci.yml` запускається на кожен push і PR: `uv sync --locked` → `ruff check` → `ruff format --check` → `pyright` → `pytest --cov` → `uv build` (wheel як artifact).
+
+Реліз **v0.4.0**: `uv build` → `dist/findex-0.4.0-py3-none-any.whl` прикріплений до GitHub Release. Перевірено встановлення в чисте оточення (окремі `UV_TOOL_DIR`, без репозиторію і `.venv`):
+```
+$ uv tool install findex-0.4.0-py3-none-any.whl && findex --version
+findex 0.4.0
+```

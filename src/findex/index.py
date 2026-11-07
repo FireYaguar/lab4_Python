@@ -1,23 +1,15 @@
-"""Inverted index: term -> postings sorted by doc_id. Built in ONE pass over the lazy corpus.
-
-    python -m findex.index data/ --out index.bin [--positions] [--limit N] [-v]
-
-The output format is chosen by suffix: *.json -> JSON, anything else -> pickle (see store.py).
-"""
+"""Inverted index: term -> postings sorted by doc_id. Built in ONE pass over the lazy corpus."""
 
 from __future__ import annotations
 
-import argparse
 import functools
 import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from itertools import islice
-from pathlib import Path
 from typing import Any
 
-from findex.corpus import Document, iter_documents
+from findex.corpus import Document
 from findex.timing import timed
 from findex.tokenize import tokenize
 
@@ -161,38 +153,3 @@ def build_index(docs: Iterable[Document], *, positions: bool = False) -> Index:
         doc_lengths[doc.doc_id] = length
         doc_meta[doc.doc_id] = DocMeta(doc.doc_id, doc.path, doc.title)
     return Index(dict(postings), doc_lengths, doc_meta, positions)
-
-
-def main(argv: list[str] | None = None) -> None:
-    from findex.stats import measure
-    from findex.store import save
-
-    ap = argparse.ArgumentParser(prog="python -m findex.index", description=__doc__)
-    ap.add_argument("root", type=Path)
-    ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--positions", action="store_true", help="store token positions (phrases)")
-    ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("-v", "--verbose", action="store_true", help="debug log (@timed)")
-    args = ap.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-
-    index, t_build, peak = measure(
-        lambda: build_index(islice(iter_documents(args.root), args.limit), positions=args.positions)
-    )
-    _, t_save, _ = measure(lambda: save(index, args.out))
-    n_postings = sum(len(p) for p in index.postings.values())
-    print(repr(index))
-    print(f"postings:    {n_postings:,}")
-    print(f"build:       {t_build:.2f} s, peak memory {peak / 2**20:.1f} MiB (tracemalloc)")
-    print(f"save:        {t_save:.2f} s -> {args.out} ({args.out.stat().st_size / 2**20:.1f} MiB)")
-
-
-if __name__ == "__main__":
-    # Run via the real module, not __main__: otherwise pickle records the classes as
-    # "__main__.Posting" and no other program can load the file.
-    from findex.index import main as _main
-
-    _main()

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import pickle
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -83,7 +83,7 @@ def _load_json(path: Path) -> Index:
 
 
 @contextmanager
-def open_index(path: Path) -> Iterator[Index]:
+def open_index(path: Path) -> Generator[Index]:
     """with open_index(p) as ix: ...  — close() runs even if the body raises or returns."""
     index = load(path)
     try:

@@ -1,23 +1,14 @@
-"""Corpus statistics in one streaming pass.
-
-    python -m findex.stats data/ [--limit N] [--top 50] [--eager]
-
---eager is the deliberately bad version (Lab 1, M4): everything goes into lists first.
-"""
+"""Corpus statistics in one streaming pass (lazy) and the deliberately eager version (Lab 1)."""
 
 from __future__ import annotations
 
-import argparse
-import logging
 import time
 import tracemalloc
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from itertools import islice
-from pathlib import Path
 
-from findex.corpus import Document, iter_documents
+from findex.corpus import Document
 from findex.tokenize import tokenize
 
 
@@ -63,34 +54,3 @@ def measure[T](fn: Callable[[], T]) -> tuple[T, float, int]:
     finally:
         tracemalloc.stop()
     return result, elapsed, peak
-
-
-def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="python -m findex.stats", description=__doc__)
-    ap.add_argument("root", type=Path, help="corpus directory or .jsonl file")
-    ap.add_argument("--limit", type=int, default=None, help="only the first N documents")
-    ap.add_argument("--top", type=int, default=50)
-    ap.add_argument("--eager", action="store_true", help="list-based version, for comparison")
-    args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-
-    compute = compute_stats_eager if args.eager else compute_stats
-
-    def run() -> CorpusStats:
-        docs = islice(iter_documents(args.root), args.limit)  # lazy --limit
-        return compute(docs)
-
-    stats, elapsed, peak = measure(run)
-    print(f"mode:        {'eager' if args.eager else 'lazy'}")
-    print(f"documents:   {stats.documents:,}")
-    print(f"tokens:      {stats.tokens:,}")
-    print(f"vocabulary:  {stats.vocabulary:,}")
-    print(f"elapsed:     {elapsed:.2f} s")
-    print(f"peak memory: {peak / 2**20:.1f} MiB (tracemalloc)")
-    print(f"\ntop-{args.top} terms:")
-    for rank, (term, n) in enumerate(stats.counts.most_common(args.top), 1):
-        print(f"{rank:>3}. {term:<20} {n:,}")
-
-
-if __name__ == "__main__":
-    main()

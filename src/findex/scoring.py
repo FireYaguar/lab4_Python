@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from findex.index import Index, Posting
@@ -40,4 +40,5 @@ class BM25:
         return idf * posting.tf * (self.k1 + 1) / (posting.tf + norm)
 
 
-SCORERS: dict[str, Scorer] = {"bm25": BM25(), "tfidf": TfIdf()}
+type ScorerName = Literal["bm25", "tfidf"]
+SCORERS: dict[ScorerName, Scorer] = {"bm25": BM25(), "tfidf": TfIdf()}

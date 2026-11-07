@@ -49,6 +49,20 @@ def _iter_jsonl(path: Path, start_id: int) -> Iterator[Document]:
             doc_id += 1
 
 
+def count_documents(root: Path) -> int:
+    """Cheap upper bound for a progress bar: text files + lines of .jsonl files."""
+    paths = [root] if root.is_file() else root.rglob("*")
+    n = 0
+    for path in paths:
+        suffix = path.suffix.lower()
+        if suffix == ".jsonl":
+            with path.open("rb") as f:
+                n += sum(1 for _ in f)
+        elif suffix in TEXT_SUFFIXES and path.is_file():
+            n += 1
+    return n
+
+
 def iter_documents(root: Path) -> Iterator[Document]:
     """Yield documents from a directory tree (.txt/.rst/.md) and/or .jsonl files.
 
